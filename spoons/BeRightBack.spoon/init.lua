@@ -22,7 +22,7 @@ obj.__index = obj
 obj.name = "BeRightBack"
 obj.version = "0.1.0"
 obj.author = "Mark Philipp"
-obj.homepage = "https://github.com/markphilipp/be-right-back"
+obj.homepage = "https://github.com/markphilipp/silverware-drawer"
 obj.license = "MIT"
 
 --- BeRightBack.assertion

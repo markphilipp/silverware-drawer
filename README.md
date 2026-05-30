@@ -1,4 +1,4 @@
-# be-right-back
+# silverware-drawer
 
 A small collection of [Hammerspoon](https://www.hammerspoon.org/) **spoons** for
 macOS automation, with a per-machine installer. The repo is shared across
@@ -28,9 +28,9 @@ to confirm (`●` marks spoons already enabled on this machine). The installer
 then:
 
 - symlinks the selected spoons into `~/.hammerspoon/Spoons/`
-- writes your selection to `~/.hammerspoon/be-right-back.config.lua` (per machine)
-- symlinks the loader to `~/.hammerspoon/be-right-back.lua`
-- adds `require("be-right-back")` to `~/.hammerspoon/init.lua` if missing
+- writes your selection to `~/.hammerspoon/silverware-drawer.config.lua` (per machine)
+- symlinks the loader to `~/.hammerspoon/silverware-drawer.lua`
+- adds `require("silverware-drawer")` to `~/.hammerspoon/init.lua` if missing
 
 Re-run `./install.sh` anytime to change the enabled set.
 
@@ -47,11 +47,11 @@ Re-run `./install.sh` anytime to change the enabled set.
 spoons are enabled:
 
 ```lua
-require("be-right-back")
+require("silverware-drawer")
 ```
 
 That resolves to the loader (`load.lua`, symlinked in), which reads the
-per-machine `be-right-back.config.lua` and `hs.loadSpoon` + `:start()`s each
+per-machine `silverware-drawer.config.lua` and `hs.loadSpoon` + `:start()`s each
 enabled spoon. The config is intentionally **not** committed — it lives next to
 your Hammerspoon config so the shared repo stays machine-agnostic.
 

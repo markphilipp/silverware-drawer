@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Remove be-right-back from this machine: unlink its spoons and loader, and
+# Remove silverware-drawer from this machine: unlink its spoons and loader, and
 # drop the require line from init.lua. The per-machine enabled config is left
 # in place unless --purge is given. Never touches the repo itself.
 set -euo pipefail
@@ -8,10 +8,10 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPOONS_SRC="$REPO/spoons"
 HS_DIR="$HOME/.hammerspoon"
 SPOON_DST_DIR="$HS_DIR/Spoons"
-CONFIG="$HS_DIR/be-right-back.config.lua"
-LOADER_DST="$HS_DIR/be-right-back.lua"
+CONFIG="$HS_DIR/silverware-drawer.config.lua"
+LOADER_DST="$HS_DIR/silverware-drawer.lua"
 INIT="$HS_DIR/init.lua"
-REQUIRE_LINE='require("be-right-back")'
+REQUIRE_LINE='require("silverware-drawer")'
 
 PURGE=0
 [ "${1:-}" = "--purge" ] && PURGE=1
