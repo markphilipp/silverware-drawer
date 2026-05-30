@@ -51,22 +51,51 @@ ENABLED_BEFORE="$(currently_enabled || true)"
 
 is_enabled() { grep -qxF "$1" <<<"$ENABLED_BEFORE"; }
 
+# --- order: currently-enabled spoons first ---------------------------------
+# fzf has no flag to pre-mark rows, but a bind can select them for us. So sort
+# the enabled spoons to the top and select exactly that many; the rest follow.
+# Result: the picker opens with the current set highlighted.
+declare -a ENABLED_NAMES=() OTHER_NAMES=()
+for name in "${NAMES[@]}"; do
+  if is_enabled "$name"; then ENABLED_NAMES+=("$name"); else OTHER_NAMES+=("$name"); fi
+done
+NAMES=( ${ENABLED_NAMES[@]+"${ENABLED_NAMES[@]}"} ${OTHER_NAMES[@]+"${OTHER_NAMES[@]}"} )
+SELECT_COUNT="${#ENABLED_NAMES[@]}"
+
+# Pre-select the leading SELECT_COUNT rows. Use the `load` event (not `start`):
+# `start` fires before the piped list is read, so there is nothing to select
+# yet. `pos(i)` addresses rows absolutely, so cursor/layout direction is moot.
+PRESELECT="load:"
+for ((i = 1; i <= SELECT_COUNT; i++)); do PRESELECT+="pos($i)+select+"; done
+PRESELECT+="pos(1)"
+
 # --- build picker lines ----------------------------------------------------
-# Format: "Name\t● description" — Name is field 1 (hidden), rest is shown.
+# Format: "Name\tName — desc" — Name is field 1 (hidden), the rest is shown.
+# Selection state is shown by fzf itself (full-line highlight + marker); the
+# currently-enabled spoons come up pre-selected (see PRESELECT above).
 picker_input() {
-  local name desc marker
+  local name desc
   for name in "${NAMES[@]}"; do
     desc="$(spoon_desc "$SPOONS_SRC/$name")"
-    if is_enabled "$name"; then marker="●"; else marker="○"; fi
-    printf '%s\t%s %s — %s\n' "$name" "$marker" "$name" "$desc"
+    if [ -n "$desc" ]; then
+      printf '%s\t%s — %s\n' "$name" "$name" "$desc"
+    else
+      printf '%s\t%s\n' "$name" "$name"
+    fi
   done
 }
 
-echo "Select spoons to enable on this machine (TAB to toggle, Enter to confirm)."
-echo "  ● = currently enabled, ○ = not enabled"
+echo "Select spoons to enable on this machine."
+echo "  Highlighted rows = selected. SPACE or TAB toggles; ENTER confirms."
 SELECTED="$(picker_input | fzf --multi --with-nth=2.. --delimiter='\t' \
-  --prompt='spoons> ' --header='TAB: toggle  ENTER: confirm  ESC: cancel' \
-  --no-sort | cut -f1 || true)"
+  --no-sort --highlight-line --cycle \
+  --pointer='▶' --marker='✓ ' \
+  --color='pointer:green,marker:green,selected-bg:22,selected-fg:255,hl:cyan,hl+:cyan,bg+:238' \
+  --bind 'space:toggle' \
+  --bind "$PRESELECT" \
+  --prompt='spoons> ' \
+  --header=$'SPACE / TAB: toggle    ENTER: confirm    ESC: cancel' \
+  | cut -f1 || true)"
 
 if [ -z "$SELECTED" ]; then
   read -r -p "No spoons selected — disable all on this machine? [y/N] " ans
