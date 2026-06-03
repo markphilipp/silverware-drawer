@@ -40,6 +40,25 @@ if [ "${#NAMES[@]}" -eq 0 ]; then
   exit 1
 fi
 
+# --- clean dead spoons ------------------------------------------------------
+# Remove repo-owned spoon links that can no longer work: the link target is
+# gone (e.g. a deleted worktree) or the spoon no longer exists in spoons/.
+# Stale config entries drop out when the config is rewritten below; warn there
+# so the disappearance is visible. Never touch links that don't point into
+# this repo.
+is_available() { local n; for n in "${NAMES[@]}"; do [ "$n" = "$1" ] && return 0; done; return 1; }
+
+for link in "$SPOON_DST_DIR"/*.spoon; do
+  [ -L "$link" ] || continue
+  target="$(readlink "$link")"
+  [[ "$target" == "$REPO/"* ]] || continue
+  name="$(basename "$link" .spoon)"
+  if [ ! -e "$link" ] || ! is_available "$name"; then
+    rm -f "$link"
+    echo "✗ removed dead spoon link: $name -> $target"
+  fi
+done
+
 # --- currently-enabled set (for display markers) ---------------------------
 currently_enabled() {
   [ -f "$CONFIG" ] || return 0
@@ -50,6 +69,13 @@ currently_enabled() {
 ENABLED_BEFORE="$(currently_enabled || true)"
 
 is_enabled() { grep -qxF "$1" <<<"$ENABLED_BEFORE"; }
+
+# Config entries with no matching spoon in the repo silently vanish when the
+# config is rewritten — call them out so the user knows why.
+while IFS= read -r name; do
+  [ -n "$name" ] || continue
+  is_available "$name" || echo "! dropping '$name' from config — no such spoon in $SPOONS_SRC"
+done <<<"$ENABLED_BEFORE"
 
 # --- order: currently-enabled spoons first ---------------------------------
 # fzf has no flag to pre-mark rows, but a bind can select them for us. So sort
@@ -105,12 +131,13 @@ fi
 # --- apply symlinks --------------------------------------------------------
 mkdir -p "$SPOON_DST_DIR"
 
-# Remove symlinks for previously-enabled spoons that point into this repo
-# (so deselecting actually unlinks). Never touch unrelated/real spoons.
+# Remove symlinks for previously-enabled spoons that point into this repo —
+# including worktree paths (so deselecting actually unlinks). Never touch
+# unrelated/real spoons.
 while IFS= read -r name; do
   [ -n "$name" ] || continue
   link="$SPOON_DST_DIR/$name.spoon"
-  if [ -L "$link" ] && [[ "$(readlink "$link")" == "$SPOONS_SRC/"* ]]; then
+  if [ -L "$link" ] && [[ "$(readlink "$link")" == "$REPO/"* ]]; then
     rm -f "$link"
   fi
 done <<<"$ENABLED_BEFORE"
