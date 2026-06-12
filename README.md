@@ -11,6 +11,8 @@ each computer keeps its own set without touching the shared code.
 | --- | --- |
 | **BeRightBack** | Caffeinate the display while unlocked, release it on lock (and a general lock/unlock action framework). |
 | **BarPeekaboo** | Show the menu bar when the built-in display is primary, hide it when an external display is. |
+| **WindowCarousel** | Cycle through the focused app's windows with a hotkey. |
+| **PullSpoon** | Fast-forward every repo's default branch under `~/Projects` daily at 4am, stashing/restoring local changes safely. |
 
 ## Requirements
 
@@ -102,6 +104,55 @@ Hammerspoon doesn't expose `CGDisplayIsBuiltin`, so the built-in display is
 detected by matching its name against `builtinPattern` (default `"Built%-in"`).
 If your built-in display reports a different name (e.g. `Color LCD`,
 `Liquid Retina`), override it per machine via config `opts`.
+
+## PullSpoon
+
+Keeps every repo's default branch current without you thinking about it. Once a
+day (default **4am**) it scans `~/Projects` recursively, finds each git repo, and
+fast-forwards its default branch (`main`/`master`/…, read from `origin/HEAD`) to
+match origin. If the Mac was asleep at the scheduled time, it catches up on the
+next wake.
+
+Discovery walks the tree for each repo's `.git`/`.bare` marker, pruning
+`node_modules`, `vendor`, and hidden dirs, and stops at each repo root — so a
+repo vendored inside another repo's working tree is left alone. Multiple
+worktrees of the same repo are refreshed once, at whichever checkout holds the
+default branch.
+
+Handles every layout uniformly — normal clones, bare-repo + worktree projects
+(`repo/.bare` with `repo/main`), and shared worktrees — and refreshes the
+default branch wherever it lives:
+
+- **not checked out** → the ref is fast-forwarded directly, no working tree touched
+- **checked out, clean** → `git pull --ff-only`
+- **checked out with uncommitted changes** → stash → pull → restore. If the pull
+  isn't a fast-forward, or restoring the stash conflicts, the repo is rolled back
+  to *exactly* its prior state (branch, working tree, index, untracked, stash all
+  intact) and skipped — handle it by hand, or let the next run try again.
+
+Repos with no `origin` remote are skipped silently.
+
+Trigger a refresh by hand from the Hammerspoon console with
+`spoon.PullSpoon:run()`. The work runs off the main thread via `hs.task`; a
+summary is posted via `hs.notify` only when a run has skips or failures.
+
+Per-machine `opts`:
+
+```lua
+{ name = "PullSpoon", opts = {
+    root = os.getenv("HOME") .. "/Projects",  -- scanned root
+    at = "04:00",                             -- daily run time, "HH:MM"
+    sshAuthSock = "/path/to/agent.sock",      -- SSH agent for fetches outside a login shell
+    notifyOnIssues = true,                    -- notify only on skips/failures
+} }
+```
+
+`sshAuthSock` defaults to the 1Password agent socket so SSH fetches authenticate
+even though the scheduled run has no login shell; set it to your machine's agent
+socket, or `false` to rely on the inherited environment.
+
+The underlying logic lives in `refresh-default-branches.sh` and can be run
+directly (`PROJECTS_ROOT=~/Projects ./refresh-default-branches.sh`).
 
 ## License
 
