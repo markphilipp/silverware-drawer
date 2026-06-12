@@ -2,8 +2,9 @@
 # Fast-forward the default branch (main/master/etc.) of every git repo found
 # anywhere under a root dir (default ~/Projects), matching origin. Repos are
 # discovered recursively by their .git/.bare marker; node_modules, vendor, and
-# hidden dirs are pruned, and the search never descends into an already-found
-# repo (so vendored/embedded checkouts are skipped).
+# hidden dirs are pruned. The search descends into a found repo's working tree
+# too, so repos nested inside another repo (e.g. gitignored sibling clones) are
+# also refreshed.
 #
 # For each repo:
 #   - default branch comes from origin/HEAD (repaired via `remote set-head` if unset)
@@ -37,16 +38,17 @@ last_line() { printf '%s' "${1##*$'\n'}"; }
 
 # Print every repo root under the given roots: dirs holding a .git (normal repo
 # or worktree) or a .bare (bare-repo project). Prunes node_modules/vendor and
-# hidden dirs (tool data like .mcp_*, .cache, .Trash), and stops at each repo
-# root — so repos embedded inside another repo's working tree (vendored/temp
-# checkouts) are left alone.
+# hidden dirs (tool data like .mcp_*, .cache, .Trash). The walk continues into a
+# repo's working tree, so repos nested inside another repo (e.g. gitignored
+# sibling clones under llp-local/applications) are discovered too. Worktrees of
+# the same repo are de-duped later by their shared git-common-dir.
 find_repos() {
   local root
   for root in "${ROOTS[@]}"; do
     [ -d "$root" ] || continue
     find "$root" \
       \( -name node_modules -o -name vendor -o -name '.?*' \) -prune -o \
-      -type d -exec sh -c 'test -e "$1/.git" -o -e "$1/.bare"' _ {} \; -print -prune
+      -type d -exec sh -c 'test -e "$1/.git" -o -e "$1/.bare"' _ {} \; -print
   done
 }
 
