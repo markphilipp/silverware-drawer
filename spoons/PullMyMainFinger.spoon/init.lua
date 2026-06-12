@@ -1,4 +1,4 @@
---- === PullSpoon ===
+--- === PullMyMainFinger ===
 ---
 --- Fast-forward every repo's default branch under ~/Projects, daily at 4am.
 ---
@@ -12,13 +12,13 @@
 --- off the main thread via hs.task; call :run() to trigger a refresh by hand.
 ---
 --- Usage in ~/.hammerspoon/init.lua:
----   hs.loadSpoon("PullSpoon")
----   spoon.PullSpoon:start()
+---   hs.loadSpoon("PullMyMainFinger")
+---   spoon.PullMyMainFinger:start()
 
 local obj = {}
 obj.__index = obj
 
-obj.name = "PullSpoon"
+obj.name = "PullMyMainFinger"
 obj.version = "0.1.0"
 obj.author = "Mark Philipp"
 obj.homepage = "https://github.com/markphilipp/silverware-drawer"
@@ -27,17 +27,17 @@ obj.license = "MIT"
 -- Resolve the bundled shell script relative to this file (survives symlinking).
 obj.spoonPath = debug.getinfo(1, "S").source:sub(2):match("(.*/)")
 
---- PullSpoon.root
+--- PullMyMainFinger.root
 --- Variable
 --- Projects root scanned for git repos. Default `~/Projects`. Change before `:start()`.
 obj.root = os.getenv("HOME") .. "/Projects"
 
---- PullSpoon.at
+--- PullMyMainFinger.at
 --- Variable
 --- Daily run time as "HH:MM" (24h). Default "04:00". Change before `:start()`.
 obj.at = "04:00"
 
---- PullSpoon.sshAuthSock
+--- PullMyMainFinger.sshAuthSock
 --- Variable
 --- SSH agent socket exported to the refresh job so fetches over SSH authenticate
 --- when run outside a login shell. Defaults to the 1Password agent socket, then
@@ -45,13 +45,13 @@ obj.at = "04:00"
 obj.sshAuthSock = os.getenv("HOME")
   .. "/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock"
 
---- PullSpoon.notifyOnIssues
+--- PullMyMainFinger.notifyOnIssues
 --- Variable
 --- Post an `hs.notify` summary only when a run has skips or failures. Default
 --- true. Set false to silence notifications entirely.
 obj.notifyOnIssues = true
 
-obj._settingsKey = "PullSpoon.lastRun"
+obj._settingsKey = "PullMyMainFinger.lastRun"
 
 function obj:_env()
   local env = {
@@ -65,17 +65,17 @@ function obj:_env()
   return env
 end
 
---- PullSpoon:run() -> self
+--- PullMyMainFinger:run() -> self
 --- Method
 --- Refresh all default branches now, asynchronously. No-op if a run is already
 --- in progress.
 function obj:run()
   if self._task and self._task:isRunning() then
-    hs.printf("[PullSpoon] run already in progress")
+    hs.printf("[PullMyMainFinger] run already in progress")
     return self
   end
   local script = self.spoonPath .. "refresh-default-branches.sh"
-  hs.printf("[PullSpoon] refreshing default branches under %s", self.root)
+  hs.printf("[PullMyMainFinger] refreshing default branches under %s", self.root)
   self._task = hs.task.new("/bin/bash", function(code, stdout, stderr)
     self._task = nil
     hs.settings.set(self._settingsKey, os.time())
@@ -90,14 +90,14 @@ function obj:_report(code, stdout, stderr)
   local refreshed = tonumber(stdout:match("refreshed=(%d+)")) or 0
   local skipped = tonumber(stdout:match("skipped=(%d+)")) or 0
   local failed = tonumber(stdout:match("failed=(%d+)")) or 0
-  hs.printf("[PullSpoon] done: %d refreshed, %d skipped, %d failed (exit %d)",
+  hs.printf("[PullMyMainFinger] done: %d refreshed, %d skipped, %d failed (exit %d)",
     refreshed, skipped, failed, code)
-  if stdout ~= "" then hs.printf("[PullSpoon]\n%s", stdout) end
-  if stderr ~= "" then hs.printf("[PullSpoon] stderr:\n%s", stderr) end
+  if stdout ~= "" then hs.printf("[PullMyMainFinger]\n%s", stdout) end
+  if stderr ~= "" then hs.printf("[PullMyMainFinger] stderr:\n%s", stderr) end
 
   if self.notifyOnIssues and (skipped + failed) > 0 then
     hs.notify.new({
-      title = "PullSpoon",
+      title = "PullMyMainFinger",
       informativeText = string.format("%d refreshed · %d skipped · %d failed",
         refreshed, skipped, failed),
       withdrawAfter = 0,
@@ -119,12 +119,12 @@ function obj:_catchUp()
   local scheduled = self:_scheduledToday()
   local last = hs.settings.get(self._settingsKey) or 0
   if os.time() >= scheduled and last < scheduled then
-    hs.printf("[PullSpoon] missed %s while asleep — catching up", self.at)
+    hs.printf("[PullMyMainFinger] missed %s while asleep — catching up", self.at)
     self:run()
   end
 end
 
---- PullSpoon:start() -> self
+--- PullMyMainFinger:start() -> self
 --- Method
 --- Schedule the daily refresh and the wake-up catch-up.
 function obj:start()
@@ -134,11 +134,11 @@ function obj:start()
     if event == hs.caffeinate.watcher.systemDidWake then self:_catchUp() end
   end)
   self._wake:start()
-  hs.printf("[PullSpoon] scheduled daily at %s (root %s)", self.at, self.root)
+  hs.printf("[PullMyMainFinger] scheduled daily at %s (root %s)", self.at, self.root)
   return self
 end
 
---- PullSpoon:stop() -> self
+--- PullMyMainFinger:stop() -> self
 --- Method
 --- Cancel the schedule and wake watcher. A run already in flight finishes.
 function obj:stop()

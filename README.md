@@ -12,7 +12,7 @@ each computer keeps its own set without touching the shared code.
 | **BeRightBack** | Caffeinate the display while unlocked, release it on lock (and a general lock/unlock action framework). |
 | **BarPeekaboo** | Show the menu bar when the built-in display is primary, hide it when an external display is. |
 | **WindowCarousel** | Cycle through the focused app's windows with a hotkey. |
-| **PullSpoon** | Fast-forward every repo's default branch under `~/Projects` daily at 4am, stashing/restoring local changes safely. |
+| **PullMyMainFinger** | Fast-forward every repo's default branch under `~/Projects` daily at 4am, stashing/restoring local changes safely. |
 
 ## Requirements
 
@@ -105,7 +105,7 @@ detected by matching its name against `builtinPattern` (default `"Built%-in"`).
 If your built-in display reports a different name (e.g. `Color LCD`,
 `Liquid Retina`), override it per machine via config `opts`.
 
-## PullSpoon
+## PullMyMainFinger
 
 Keeps every repo's default branch current without you thinking about it. Once a
 day (default **4am**) it scans `~/Projects` recursively, finds each git repo, and
@@ -133,13 +133,13 @@ default branch wherever it lives:
 Repos with no `origin` remote are skipped silently.
 
 Trigger a refresh by hand from the Hammerspoon console with
-`spoon.PullSpoon:run()`. The work runs off the main thread via `hs.task`; a
+`spoon.PullMyMainFinger:run()`. The work runs off the main thread via `hs.task`; a
 summary is posted via `hs.notify` only when a run has skips or failures.
 
 Per-machine `opts`:
 
 ```lua
-{ name = "PullSpoon", opts = {
+{ name = "PullMyMainFinger", opts = {
     root = os.getenv("HOME") .. "/Projects",  -- scanned root
     at = "04:00",                             -- daily run time, "HH:MM"
     sshAuthSock = "/path/to/agent.sock",      -- SSH agent for fetches outside a login shell
