@@ -13,11 +13,18 @@ each computer keeps its own set without touching the shared code.
 | **BarPeekaboo** | Show the menu bar when the built-in display is primary, hide it when an external display is. |
 | **WindowCarousel** | Cycle through the focused app's windows with a hotkey. |
 | **PullMyMainFinger** | Fast-forward every repo's default branch under `~/Projects` daily at 4am, stashing/restoring local changes safely. |
+| **WorkFocus** | Enable macOS Work Focus while active; clear it after five minutes idle. |
 
 ## Requirements
 
 - [Hammerspoon](https://www.hammerspoon.org/)
 - [`fzf`](https://github.com/junegunn/fzf) (`brew install fzf`)
+
+Hammerspoon must have Accessibility permission. Enable **System Settings →
+Privacy & Security → Accessibility → Hammerspoon** before running the installer.
+The installer checks this when the `hs` command is available and stops if
+permission is explicitly disabled. If Hammerspoon is not running, it prints a
+warning and the check can be completed after launching Hammerspoon.
 
 ## Install
 

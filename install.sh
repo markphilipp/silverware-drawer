@@ -22,6 +22,30 @@ if ! command -v fzf >/dev/null 2>&1; then
   exit 1
 fi
 
+check_accessibility() {
+  if ! command -v hs >/dev/null 2>&1; then
+    echo "warning: Hammerspoon CLI 'hs' not found; Accessibility could not be checked." >&2
+    return
+  fi
+
+  local state
+  state="$(hs -c 'print(hs.accessibilityState())' 2>/dev/null || true)"
+  case "$state" in
+    *true*) ;;
+    *false*)
+      echo "error: Hammerspoon does not have Accessibility permission." >&2
+      echo "       Enable it in System Settings > Privacy & Security > Accessibility." >&2
+      echo "       Then rerun ./install.sh." >&2
+      exit 1
+      ;;
+    *)
+      echo "warning: Hammerspoon is not running; Accessibility could not be checked." >&2
+      ;;
+  esac
+}
+
+check_accessibility
+
 # --- discover spoons -------------------------------------------------------
 # Read a one-line description from each spoon's '--- === Name ===' header: the
 # first prose '--- ...' line that isn't the title banner.
