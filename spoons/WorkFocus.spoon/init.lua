@@ -10,21 +10,26 @@ obj.license = "MIT"
 
 obj.idleAfter = 5 * 60
 obj.checkEvery = 10
-obj.spoonPath = debug.getinfo(1, "S").source:sub(2):match("(.*/)")
 obj._desiredOn = nil
 obj._running = false
+
+--- Shortcuts.app shortcut names, each built with a single "Set Focus" action.
+--- Create these once in Shortcuts.app (Work Focus On -> turn on, Work Focus Off -> turn off).
+obj.shortcutOn = "Work Focus On"
+obj.shortcutOff = "Work Focus Off"
 
 function obj:_setFocus(on)
   self._desiredOn = on
   if self._task then return end
 
-  self._task = hs.task.new("/usr/bin/osascript", function(code, _, stderr)
+  local shortcutName = on and self.shortcutOn or self.shortcutOff
+  self._task = hs.task.new("/usr/bin/shortcuts", function(code, _, stderr)
     self._task = nil
     if code ~= 0 then
-      hs.printf("[WorkFocus] failed to set Focus: %s", stderr or code)
+      hs.printf("[WorkFocus] failed to run shortcut '%s': %s", shortcutName, stderr or code)
     end
     if self._running then self:_sync() end
-  end, {"-l", "JavaScript", self.spoonPath .. "focus.jxa.js", on and "on" or "off"})
+  end, {"run", shortcutName})
   self._task:start()
 end
 
