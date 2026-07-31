@@ -1,6 +1,6 @@
 --- === PullMyMainFinger ===
 ---
---- Fast-forward every repo's default branch under ~/Projects, daily at 4am.
+--- Fast-forward every repo's default branch under ~/Projects, daily at 11pm.
 ---
 --- Scans the projects root for git repos and brings each one's default branch
 --- (main/master/…) up to date with origin. A branch checked out with
@@ -34,8 +34,8 @@ obj.root = os.getenv("HOME") .. "/Projects"
 
 --- PullMyMainFinger.at
 --- Variable
---- Daily run time as "HH:MM" (24h). Default "04:00". Change before `:start()`.
-obj.at = "04:00"
+--- Daily run time as "HH:MM" (24h). Default "23:00". Change before `:start()`.
+obj.at = "23:00"
 
 --- PullMyMainFinger.sshAuthSock
 --- Variable
@@ -47,8 +47,9 @@ obj.sshAuthSock = os.getenv("HOME")
 
 --- PullMyMainFinger.notifyOnIssues
 --- Variable
---- Post an `hs.notify` summary only when a run has skips or failures. Default
---- true. Set false to silence notifications entirely.
+--- Post an `hs.notify` summary, including each skip/failure line, only when a
+--- run has skips or failures. Default true. Set false to silence
+--- notifications entirely.
 obj.notifyOnIssues = true
 
 obj._settingsKey = "PullMyMainFinger.lastRun"
@@ -96,10 +97,16 @@ function obj:_report(code, stdout, stderr)
   if stderr ~= "" then hs.printf("[PullMyMainFinger] stderr:\n%s", stderr) end
 
   if self.notifyOnIssues and (skipped + failed) > 0 then
+    local issues = {}
+    for line in stdout:gmatch("[^\n]+") do
+      if line:match("^skip%s") or line:match("^FAIL%s") then
+        table.insert(issues, line)
+      end
+    end
     hs.notify.new({
       title = "PullMyMainFinger",
-      informativeText = string.format("%d refreshed · %d skipped · %d failed",
-        refreshed, skipped, failed),
+      informativeText = string.format("%d refreshed · %d skipped · %d failed\n%s",
+        refreshed, skipped, failed, table.concat(issues, "\n")),
       withdrawAfter = 0,
     }):send()
   end
