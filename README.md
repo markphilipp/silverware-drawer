@@ -12,7 +12,7 @@ each computer keeps its own set without touching the shared code.
 | **BeRightBack** | Caffeinate the display while unlocked, release it on lock (and a general lock/unlock action framework). |
 | **BarPeekaboo** | Show the menu bar when the built-in display is primary, hide it when an external display is. |
 | **WindowCarousel** | Cycle through the focused app's windows with a hotkey. |
-| **PullMyMainFinger** | Fast-forward every repo's default branch under `~/Projects` daily at 4am, stashing/restoring local changes safely. |
+| **PullMyMainFinger** | Fast-forward every repo's default branch under `~/Projects` on screen lock (at most once a day), stashing/restoring local changes safely. |
 | **WorkFocus** | Enable macOS Work Focus while active; clear it after five minutes idle. |
 
 ## Requirements
@@ -114,11 +114,14 @@ If your built-in display reports a different name (e.g. `Color LCD`,
 
 ## PullMyMainFinger
 
-Keeps every repo's default branch current without you thinking about it. Once a
-day (default **4am**) it scans `~/Projects` recursively, finds each git repo, and
-fast-forwards its default branch (`main`/`master`/…, read from `origin/HEAD`) to
-match origin. If the Mac was asleep at the scheduled time, it catches up on the
-next wake.
+Keeps every repo's default branch current without you thinking about it.
+Triggers whenever the screen locks (a natural moment to hit the network, since
+you're stepping away), but only actually runs if it's been at least
+`minHoursBetweenRuns` (default **8**) since the last successful run. If the
+SSH agent has no usable identities — e.g. 1Password is locked — the run is
+skipped outright rather than generating a batch of doomed-to-fail fetches; it
+scans `~/Projects` recursively, finds each git repo, and fast-forwards its
+default branch (`main`/`master`/…, read from `origin/HEAD`) to match origin.
 
 Discovery walks the tree for each repo's `.git`/`.bare` marker, pruning
 `node_modules`, `vendor`, and hidden dirs, and stops at each repo root — so a
@@ -140,15 +143,19 @@ default branch wherever it lives:
 Repos with no `origin` remote are skipped silently.
 
 Trigger a refresh by hand from the Hammerspoon console with
-`spoon.PullMyMainFinger:run()`. The work runs off the main thread via `hs.task`; a
-summary is posted via `hs.notify` only when a run has skips or failures.
+`spoon.PullMyMainFinger:run()` — this still checks the SSH agent, but ignores
+the `minHoursBetweenRuns` gate. The work runs off the main thread via
+`hs.task`; a summary is posted via `hs.notify` only when a run has skips or
+failures worth a look — a "not fast-forwardable" skip (diverged local commits)
+is logged to the console but never triggers a notification, since it's routine
+and self-resolves once you push or rebase.
 
 Per-machine `opts`:
 
 ```lua
 { name = "PullMyMainFinger", opts = {
     root = os.getenv("HOME") .. "/Projects",  -- scanned root
-    at = "04:00",                             -- daily run time, "HH:MM"
+    minHoursBetweenRuns = 8,                  -- min hours between successful runs
     sshAuthSock = "/path/to/agent.sock",      -- SSH agent for fetches outside a login shell
     notifyOnIssues = true,                    -- notify only on skips/failures
 } }

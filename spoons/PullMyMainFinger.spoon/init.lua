@@ -1,15 +1,21 @@
 --- === PullMyMainFinger ===
 ---
---- Fast-forward every repo's default branch under ~/Projects, daily at 11pm.
+--- Fast-forward every repo's default branch under ~/Projects, whenever the
+--- screen locks.
 ---
 --- Scans the projects root for git repos and brings each one's default branch
 --- (main/master/…) up to date with origin. A branch checked out with
 --- uncommitted changes is stashed, pulled, and restored; any conflict rolls the
 --- repo back to its prior state and skips it, so nothing is ever clobbered.
 ---
---- Runs on a daily schedule and catches up on wake if the Mac was asleep at the
---- scheduled time. The actual work lives in refresh-default-branches.sh, run
---- off the main thread via hs.task; call :run() to trigger a refresh by hand.
+--- Triggers on screen lock (you're stepping away, so it's a good time to hit
+--- the network), gated so it only actually runs if it's been at least
+--- `minHoursBetweenRuns` since the last successful run, and skipped outright if
+--- the SSH agent has no usable identities (e.g. 1Password is locked) — no point
+--- running a batch of fetches we already know will fail auth. The actual work
+--- lives in refresh-default-branches.sh, run off the main thread via hs.task;
+--- call :run() to trigger a refresh by hand (this still checks the SSH agent,
+--- but ignores the minHoursBetweenRuns gate).
 ---
 --- Usage in ~/.hammerspoon/init.lua:
 ---   hs.loadSpoon("PullMyMainFinger")
@@ -32,10 +38,11 @@ obj.spoonPath = debug.getinfo(1, "S").source:sub(2):match("(.*/)")
 --- Projects root scanned for git repos. Default `~/Projects`. Change before `:start()`.
 obj.root = os.getenv("HOME") .. "/Projects"
 
---- PullMyMainFinger.at
+--- PullMyMainFinger.minHoursBetweenRuns
 --- Variable
---- Daily run time as "HH:MM" (24h). Default "23:00". Change before `:start()`.
-obj.at = "23:00"
+--- Minimum hours since the last successful run before a screen-lock will
+--- trigger another one. Default 8.
+obj.minHoursBetweenRuns = 8
 
 --- PullMyMainFinger.sshAuthSock
 --- Variable
@@ -52,7 +59,7 @@ obj.sshAuthSock = os.getenv("HOME")
 --- notifications entirely.
 obj.notifyOnIssues = true
 
-obj._settingsKey = "PullMyMainFinger.lastRun"
+obj._lastSuccessKey = "PullMyMainFinger.lastSuccess"
 
 function obj:_env()
   local env = {
@@ -66,20 +73,40 @@ function obj:_env()
   return env
 end
 
+local function shQuote(s)
+  return "'" .. s:gsub("'", "'\\''") .. "'"
+end
+
+-- ssh-add exits non-zero both when it can't reach the agent and when the
+-- agent is reachable but has no identities (1Password locked) — either way
+-- fetches would fail auth, so treat both as "not usable right now".
+function obj:_sshAgentUnusable()
+  local sock = self.sshAuthSock
+  if sock == nil then sock = os.getenv("SSH_AUTH_SOCK") end
+  if not sock then return false end
+  local _, ok = hs.execute("SSH_AUTH_SOCK=" .. shQuote(sock) .. " /usr/bin/ssh-add -l >/dev/null 2>&1")
+  return not ok
+end
+
 --- PullMyMainFinger:run() -> self
 --- Method
---- Refresh all default branches now, asynchronously. No-op if a run is already
---- in progress.
+--- Refresh all default branches now, asynchronously. No-op if a run is
+--- already in progress, or if the SSH agent has no usable identities (we
+--- already know every fetch would fail auth).
 function obj:run()
   if self._task and self._task:isRunning() then
     hs.printf("[PullMyMainFinger] run already in progress")
+    return self
+  end
+  if self:_sshAgentUnusable() then
+    hs.printf("[PullMyMainFinger] SSH agent has no usable identities (locked?) — skipping run")
     return self
   end
   local script = self.spoonPath .. "refresh-default-branches.sh"
   hs.printf("[PullMyMainFinger] refreshing default branches under %s", self.root)
   self._task = hs.task.new("/bin/bash", function(code, stdout, stderr)
     self._task = nil
-    hs.settings.set(self._settingsKey, os.time())
+    if code == 0 then hs.settings.set(self._lastSuccessKey, os.time()) end
     self:_report(code, stdout or "", stderr or "")
   end, { script })
   self._task:setEnvironment(self:_env())
@@ -96,61 +123,60 @@ function obj:_report(code, stdout, stderr)
   if stdout ~= "" then hs.printf("[PullMyMainFinger]\n%s", stdout) end
   if stderr ~= "" then hs.printf("[PullMyMainFinger] stderr:\n%s", stderr) end
 
-  if self.notifyOnIssues and (skipped + failed) > 0 then
+  if self.notifyOnIssues then
+    -- Diverged-history skips are routine and already logged above; they don't
+    -- need a human's attention the way a stash conflict or a real failure does.
     local issues = {}
     for line in stdout:gmatch("[^\n]+") do
-      if line:match("^skip%s") or line:match("^FAIL%s") then
+      if (line:match("^skip%s") or line:match("^FAIL%s"))
+        and not line:match("not fast%-forwardable") then
         table.insert(issues, line)
       end
     end
-    hs.notify.new({
-      title = "PullMyMainFinger",
-      informativeText = string.format("%d refreshed · %d skipped · %d failed\n%s",
-        refreshed, skipped, failed, table.concat(issues, "\n")),
-      withdrawAfter = 0,
-    }):send()
+    if #issues > 0 then
+      hs.notify.new({
+        title = "PullMyMainFinger",
+        informativeText = string.format("%d refreshed · %d skipped · %d failed\n%s",
+          refreshed, skipped, failed, table.concat(issues, "\n")),
+        withdrawAfter = 0,
+      }):send()
+    end
   end
 end
 
--- Today's scheduled instant (os.time) from the "HH:MM" string.
-function obj:_scheduledToday()
-  local hh, mm = self.at:match("(%d+):(%d+)")
-  local t = os.date("*t")
-  t.hour, t.min, t.sec = tonumber(hh), tonumber(mm), 0
-  return os.time(t)
+-- True once it's been at least minHoursBetweenRuns since the last successful run.
+function obj:_dueForRun()
+  local last = hs.settings.get(self._lastSuccessKey) or 0
+  return (os.time() - last) >= self.minHoursBetweenRuns * 3600
 end
 
--- Run if the scheduled time has passed today but we haven't run since (i.e. the
--- Mac was asleep when the timer should have fired).
-function obj:_catchUp()
-  local scheduled = self:_scheduledToday()
-  local last = hs.settings.get(self._settingsKey) or 0
-  if os.time() >= scheduled and last < scheduled then
-    hs.printf("[PullMyMainFinger] missed %s while asleep — catching up", self.at)
-    self:run()
-  end
+function obj:_onScreenLock()
+  if not self:_dueForRun() then return end
+  hs.printf("[PullMyMainFinger] screen locked, no successful run in %dh — attempting refresh",
+    self.minHoursBetweenRuns)
+  self:run()
 end
 
 --- PullMyMainFinger:start() -> self
 --- Method
---- Schedule the daily refresh and the wake-up catch-up.
+--- Watch for the screen locking and attempt a refresh each time, gated by
+--- minHoursBetweenRuns and the SSH agent check.
 function obj:start()
   self:stop()
-  self._timer = hs.timer.doAt(self.at, "1d", function() self:run() end)
-  self._wake = hs.caffeinate.watcher.new(function(event)
-    if event == hs.caffeinate.watcher.systemDidWake then self:_catchUp() end
+  local w = hs.caffeinate.watcher
+  self._watcher = w.new(function(event)
+    if event == w.screensDidLock then self:_onScreenLock() end
   end)
-  self._wake:start()
-  hs.printf("[PullMyMainFinger] scheduled daily at %s (root %s)", self.at, self.root)
+  self._watcher:start()
+  hs.printf("[PullMyMainFinger] watching for screen lock (root %s)", self.root)
   return self
 end
 
 --- PullMyMainFinger:stop() -> self
 --- Method
---- Cancel the schedule and wake watcher. A run already in flight finishes.
+--- Stop watching for screen lock. A run already in flight finishes.
 function obj:stop()
-  if self._timer then self._timer:stop(); self._timer = nil end
-  if self._wake then self._wake:stop(); self._wake = nil end
+  if self._watcher then self._watcher:stop(); self._watcher = nil end
   return self
 end
 
