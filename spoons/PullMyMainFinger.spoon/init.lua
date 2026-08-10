@@ -1,21 +1,27 @@
 --- === PullMyMainFinger ===
 ---
---- Fast-forward every repo's default branch under ~/Projects, whenever the
---- screen locks.
+--- Fast-forward every repo's default branch under ~/Projects while you're away
+--- from the keyboard.
 ---
 --- Scans the projects root for git repos and brings each one's default branch
 --- (main/master/…) up to date with origin. A branch checked out with
 --- uncommitted changes is stashed, pulled, and restored; any conflict rolls the
 --- repo back to its prior state and skips it, so nothing is ever clobbered.
 ---
---- Triggers on screen lock (you're stepping away, so it's a good time to hit
---- the network), gated so it only actually runs if it's been at least
---- `minHoursBetweenRuns` since the last successful run, and skipped outright if
---- the SSH agent has no usable identities (e.g. 1Password is locked) — no point
---- running a batch of fetches we already know will fail auth. The actual work
---- lives in refresh-default-branches.sh, run off the main thread via hs.task;
---- call :run() to trigger a refresh by hand (this still checks the SSH agent,
---- but ignores the minHoursBetweenRuns gate).
+--- Triggers once the Mac has been idle for `idleMinutes` **with the screen
+--- still unlocked**, and only if it's been at least `minHoursBetweenRuns` since
+--- the last successful run. The unlocked part is the whole point: a locked
+--- screen also locks 1Password, and its SSH agent then refuses to sign, so
+--- every fetch sits waiting on an authorization prompt nobody is there to
+--- answer.
+---
+--- A run in flight is cancelled as soon as you touch the machine or the screen
+--- locks. Cancellation is cooperative — the script finishes the repo it's on
+--- and stops there, so no repo is ever left mid stash/pull/restore.
+---
+--- The actual work lives in refresh-default-branches.sh, run off the main
+--- thread via hs.task; call :run() to trigger a refresh by hand (this ignores
+--- both the idle and minHoursBetweenRuns gates).
 ---
 --- Usage in ~/.hammerspoon/init.lua:
 ---   hs.loadSpoon("PullMyMainFinger")
@@ -25,7 +31,7 @@ local obj = {}
 obj.__index = obj
 
 obj.name = "PullMyMainFinger"
-obj.version = "0.1.0"
+obj.version = "0.2.0"
 obj.author = "Mark Philipp"
 obj.homepage = "https://github.com/markphilipp/silverware-drawer"
 obj.license = "MIT"
@@ -38,10 +44,30 @@ obj.spoonPath = debug.getinfo(1, "S").source:sub(2):match("(.*/)")
 --- Projects root scanned for git repos. Default `~/Projects`. Change before `:start()`.
 obj.root = os.getenv("HOME") .. "/Projects"
 
+--- PullMyMainFinger.idleMinutes
+--- Variable
+--- Minutes of no keyboard/mouse activity (screen still unlocked) before a run
+--- starts. Default 5.
+obj.idleMinutes = 5
+
+--- PullMyMainFinger.pollSeconds
+--- Variable
+--- How often idle state is checked, both to start a run and to cancel one
+--- that's in flight. Default 60. A screen lock cancels immediately regardless,
+--- via the caffeinate watcher.
+obj.pollSeconds = 60
+
+--- PullMyMainFinger.retryAfterCancelMinutes
+--- Variable
+--- Minutes to wait after a cancelled run before idle can trigger another.
+--- Without it, sitting still while reading restarts the whole scan every
+--- `idleMinutes`. Default 30.
+obj.retryAfterCancelMinutes = 30
+
 --- PullMyMainFinger.minHoursBetweenRuns
 --- Variable
---- Minimum hours since the last successful run before a screen-lock will
---- trigger another one. Default 8.
+--- Minimum hours since the last successful run before going idle will trigger
+--- another one. Default 8.
 obj.minHoursBetweenRuns = 8
 
 --- PullMyMainFinger.sshAuthSock
@@ -73,74 +99,76 @@ function obj:_env()
   return env
 end
 
-local function shQuote(s)
-  return "'" .. s:gsub("'", "'\\''") .. "'"
-end
-
--- ssh-add exits non-zero both when it can't reach the agent and when the
--- agent is reachable but has no identities (1Password locked) — either way
--- fetches would fail auth, so treat both as "not usable right now".
-function obj:_sshAgentUnusable()
-  local sock = self.sshAuthSock
-  if sock == nil then sock = os.getenv("SSH_AUTH_SOCK") end
-  if not sock then return false end
-  local _, ok = hs.execute("SSH_AUTH_SOCK=" .. shQuote(sock) .. " /usr/bin/ssh-add -l >/dev/null 2>&1")
-  return not ok
-end
-
 --- PullMyMainFinger:run() -> self
 --- Method
---- Refresh all default branches now, asynchronously. No-op if a run is
---- already in progress, or if the SSH agent has no usable identities (we
---- already know every fetch would fail auth).
+--- Refresh all default branches now, asynchronously. No-op if a run is already
+--- in progress. The script itself proves the SSH agent can sign before it
+--- touches any repo, and aborts the whole run on the first auth failure.
 function obj:run()
   if self._task and self._task:isRunning() then
     hs.printf("[PullMyMainFinger] run already in progress")
     return self
   end
-  if self:_sshAgentUnusable() then
-    hs.printf("[PullMyMainFinger] SSH agent has no usable identities (locked?) — skipping run")
-    return self
-  end
   local script = self.spoonPath .. "refresh-default-branches.sh"
   hs.printf("[PullMyMainFinger] refreshing default branches under %s", self.root)
+  self._cancelled = false
   self._task = hs.task.new("/bin/bash", function(code, stdout, stderr)
+    local cancelled = self._cancelled
     self._task = nil
     if code == 0 then hs.settings.set(self._lastSuccessKey, os.time()) end
-    self:_report(code, stdout or "", stderr or "")
+    self:_report(code, stdout or "", stderr or "", cancelled)
   end, { script })
   self._task:setEnvironment(self:_env())
   self._task:start()
   return self
 end
 
-function obj:_report(code, stdout, stderr)
+--- PullMyMainFinger:cancel([reason]) -> self
+--- Method
+--- Stop a run in flight. The script finishes whichever repo it's on and stops
+--- before the next one, so nothing is left half-done.
+function obj:cancel(reason)
+  if not (self._task and self._task:isRunning()) then return self end
+  self._cancelled = true
+  self._lastCancel = os.time()
+  hs.printf("[PullMyMainFinger] cancelling run (%s)", reason or "requested")
+  self._task:terminate()
+  return self
+end
+
+function obj:_report(code, stdout, stderr, cancelled)
   local refreshed = tonumber(stdout:match("refreshed=(%d+)")) or 0
   local skipped = tonumber(stdout:match("skipped=(%d+)")) or 0
   local failed = tonumber(stdout:match("failed=(%d+)")) or 0
-  hs.printf("[PullMyMainFinger] done: %d refreshed, %d skipped, %d failed (exit %d)",
-    refreshed, skipped, failed, code)
+  hs.printf("[PullMyMainFinger] %s: %d refreshed, %d skipped, %d failed (exit %d)",
+    cancelled and "cancelled" or "done", refreshed, skipped, failed, code)
   if stdout ~= "" then hs.printf("[PullMyMainFinger]\n%s", stdout) end
   if stderr ~= "" then hs.printf("[PullMyMainFinger] stderr:\n%s", stderr) end
 
-  if self.notifyOnIssues then
-    -- Diverged-history skips are routine and already logged above; they don't
-    -- need a human's attention the way a stash conflict or a real failure does.
-    local issues = {}
-    for line in stdout:gmatch("[^\n]+") do
-      if (line:match("^skip%s") or line:match("^FAIL%s"))
-        and not line:match("not fast%-forwardable") then
-        table.insert(issues, line)
-      end
+  -- A cancelled run stopped on purpose; whatever it hadn't reached isn't news.
+  if cancelled or not self.notifyOnIssues then return end
+
+  -- Diverged histories and an unreachable network are routine, already logged
+  -- above, and fix themselves; they don't need a human's attention the way a
+  -- stash conflict or an auth failure does.
+  local issues = {}
+  for line in stdout:gmatch("[^\n]+") do
+    if (line:match("^skip%s") or line:match("^FAIL%s"))
+      and not line:match("not fast%-forwardable")
+      and not line:match("network unavailable") then
+      table.insert(issues, line)
     end
-    if #issues > 0 then
-      hs.notify.new({
-        title = "PullMyMainFinger",
-        informativeText = string.format("%d refreshed · %d skipped · %d failed\n%s",
-          refreshed, skipped, failed, table.concat(issues, "\n")),
-        withdrawAfter = 0,
-      }):send()
-    end
+  end
+  if #issues > 0 then
+    hs.notify.new({
+      title = "PullMyMainFinger",
+      -- These never auto-withdraw, so they must be dateable — otherwise one
+      -- from days ago reads as a run that just failed.
+      subTitle = os.date("%a %b %d, %I:%M %p"),
+      informativeText = string.format("%d refreshed · %d skipped · %d failed\n%s",
+        refreshed, skipped, failed, table.concat(issues, "\n")),
+      withdrawAfter = 0,
+    }):send()
   end
 end
 
@@ -150,32 +178,73 @@ function obj:_dueForRun()
   return (os.time() - last) >= self.minHoursBetweenRuns * 3600
 end
 
-function obj:_onScreenLock()
+-- Lock state comes from the caffeinate watcher; this only seeds it at :start(),
+-- since Apple's session dictionary spells the key without the usual `k` prefix
+-- and simply omits it while unlocked.
+local function screenLockedNow()
+  local props = hs.caffeinate.sessionProperties()
+  if not props then return false end
+  local locked = props.CGSSessionScreenIsLocked
+  if locked == nil then locked = props.kCGSSessionScreenIsLockedKey end
+  return locked ~= nil and locked ~= false and locked ~= 0
+end
+
+function obj:_screenLocked()
+  return self._locked == true
+end
+
+-- Someone touched the machine since roughly the last poll (idleTime resets to
+-- zero on any HID event), or the screen locked — which locks the SSH agent too.
+function obj:_userIsBack()
+  return self:_screenLocked() or hs.host.idleTime() < self.pollSeconds * 2
+end
+
+function obj:_tick()
+  if self._task and self._task:isRunning() then
+    if self:_userIsBack() then self:cancel("machine back in use") end
+    return
+  end
+  if self:_screenLocked() then return end
+  if hs.host.idleTime() < self.idleMinutes * 60 then return end
   if not self:_dueForRun() then return end
-  hs.printf("[PullMyMainFinger] screen locked, no successful run in %dh — attempting refresh",
-    self.minHoursBetweenRuns)
+  if self._lastCancel
+    and (os.time() - self._lastCancel) < self.retryAfterCancelMinutes * 60 then
+    return
+  end
+  hs.printf("[PullMyMainFinger] idle %d min, unlocked, no successful run in %dh — refreshing",
+    self.idleMinutes, self.minHoursBetweenRuns)
   self:run()
 end
 
 --- PullMyMainFinger:start() -> self
 --- Method
---- Watch for the screen locking and attempt a refresh each time, gated by
---- minHoursBetweenRuns and the SSH agent check.
+--- Poll idle state and refresh once the machine has been idle and unlocked for
+--- `idleMinutes`, gated by `minHoursBetweenRuns`. Also cancels a run in flight
+--- the moment the machine is used again or the screen locks.
 function obj:start()
   self:stop()
+  self._locked = screenLockedNow()
   local w = hs.caffeinate.watcher
   self._watcher = w.new(function(event)
-    if event == w.screensDidLock then self:_onScreenLock() end
+    if event == w.screensDidLock then
+      self._locked = true
+      self:cancel("screen locked")
+    elseif event == w.screensDidUnlock then
+      self._locked = false
+    end
   end)
   self._watcher:start()
-  hs.printf("[PullMyMainFinger] watching for screen lock (root %s)", self.root)
+  self._timer = hs.timer.new(self.pollSeconds, function() self:_tick() end)
+  self._timer:start()
+  hs.printf("[PullMyMainFinger] watching for %d min idle (root %s)", self.idleMinutes, self.root)
   return self
 end
 
 --- PullMyMainFinger:stop() -> self
 --- Method
---- Stop watching for screen lock. A run already in flight finishes.
+--- Stop polling. A run already in flight finishes — call `:cancel()` for that.
 function obj:stop()
+  if self._timer then self._timer:stop(); self._timer = nil end
   if self._watcher then self._watcher:stop(); self._watcher = nil end
   return self
 end

@@ -21,20 +21,138 @@
 # and shared worktrees alike — the default branch is refreshed wherever it lives.
 #
 # Env:
-#   PROJECTS_ROOT   colon-separated roots scanned for repos (default: $HOME/Projects)
+#   PROJECTS_ROOT       colon-separated roots scanned for repos (default: $HOME/Projects)
+#   SSH_PROBE_TIMEOUT   seconds to wait on the agent signing probe (default 10)
+#   NET_PROBE_HOST      host TCP-probed for reachability (default github.com)
+#   NET_PROBE_TIMEOUT   seconds to wait on that probe (default 8)
 #
-# Exit: 0 if nothing failed, 1 if any repo failed. Emits per-repo lines plus a
-# trailing `PULLSPOON_SUMMARY refreshed=N skipped=N failed=N` line for callers.
+# Exit: 0 if nothing failed, 1 if any repo failed, 3 if the SSH agent can't
+# sign, 4 if cancelled via SIGTERM/SIGINT, 5 if the remote is unreachable. For
+# 3 and 5 either nothing was attempted, or the run stopped at the first such
+# failure — every remaining repo would fail identically. Emits per-repo lines
+# plus a trailing `PULLSPOON_SUMMARY refreshed=N skipped=N failed=N` line.
 set -o pipefail
 
 IFS=':' read -ra ROOTS <<< "${PROJECTS_ROOT:-$HOME/Projects}"
 
+# Never block on a prompt: git should fail fast rather than sit waiting for
+# credentials or a host-key answer in a context with no terminal.
+export GIT_TERMINAL_PROMPT=0
+export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o ConnectTimeout=10}"
+
 refreshed=()
 skipped=()
 failed=()
-seen=""  # shared git dirs already processed, so worktrees aren't refreshed twice
+seen=""       # shared git dirs already processed, so worktrees aren't refreshed twice
+auth_error="" # set when auth dies; the whole run stops, since every repo would fail too
+net_error=""  # ditto for an unreachable remote
+cancelled=""
 
-last_line() { printf '%s' "${1##*$'\n'}"; }
+# Cancellation is cooperative: the flag is checked between repos, so we never
+# get killed between `stash push` and `stash pop` and strand someone's changes.
+trap 'cancelled=1' TERM INT
+
+# Git's real error is usually followed by boilerplate ("...and the repository
+# exists."), so a plain tail throws away the only useful line.
+err_line() {
+  printf '%s\n' "$1" \
+    | grep -m1 -E 'Could not resolve|Resolving timed out|Temporary failure in name resolution|not known|Network is unreachable|Operation timed out|Connection (timed out|refused)|Permission denied|Could not read from remote|Authentication failed|authorization|refused operation|Host key verification|^fatal:|^error:' \
+    || printf '%s\n' "$1" | grep -v '^[[:space:]]*$' | tail -n1
+}
+
+# network  → can't reach the remote at all; transient, and every repo would fail
+# auth     → the agent won't sign; every remaining repo would fail the same way
+# diverged → local commits ahead of origin; routine, nothing to fix
+# error    → anything else, worth a human's attention
+#
+# Network is tested first on purpose: a DNS failure also prints "Could not read
+# from remote repository", so matching auth first would blame 1Password for an
+# outage.
+classify() {
+  case "$1" in
+    *"Could not resolve"*|*"Resolving timed out"*|*"Temporary failure in name resolution"* \
+      |*"nodename nor servname"*|*"Network is unreachable"*|*"Operation timed out"* \
+      |*"Connection timed out"*|*"Connection refused"*|*"kex_exchange_identification"*)
+      printf 'network' ;;
+    *"Permission denied"*|*"Could not read from remote"*|*"Authentication failed"* \
+      |*authorization*|*"refused operation"*|*"Host key verification failed"*)
+      printf 'auth' ;;
+    *"non-fast-forward"*|*"Not possible to fast-forward"*|*"rejected"* \
+      |*diverged*|*"unrelated histories"*)
+      printf 'diverged' ;;
+    *)
+      printf 'error' ;;
+  esac
+}
+
+# Run a command, killing it after N seconds. Returns 124 on timeout, like
+# coreutils `timeout` (which macOS doesn't ship).
+run_bounded() {
+  local secs="$1" pid elapsed=0
+  shift
+  "$@" >/dev/null 2>&1 &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$elapsed" -ge "$secs" ]; then
+      kill -TERM "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+      return 124
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  wait "$pid"
+}
+
+# `ssh-add -l` only *lists* identities — it succeeds even when 1Password is
+# locked and will refuse to sign. Signing is what every fetch actually needs,
+# so prove that before grinding through twenty repos' worth of 60s prompt
+# timeouts. Bounded, because a locked agent answers by not answering.
+preflight_ssh() {
+  [ -n "${SSH_AUTH_SOCK:-}" ] || return 0
+  if [ ! -S "$SSH_AUTH_SOCK" ]; then
+    auth_error="agent socket missing ($SSH_AUTH_SOCK)"
+    return 1
+  fi
+  local keys rc
+  keys="$(mktemp -t pullspoon)" || return 0
+  if ! ssh-add -L > "$keys" 2>/dev/null; then
+    rm -f "$keys"
+    auth_error="agent has no identities"
+    return 1
+  fi
+  run_bounded "${SSH_PROBE_TIMEOUT:-10}" ssh-add -T "$keys"
+  rc=$?
+  rm -f "$keys"
+  case "$rc" in
+    0)   return 0 ;;
+    124) auth_error="agent did not answer a signing request in ${SSH_PROBE_TIMEOUT:-10}s (locked?)" ;;
+    *)   auth_error="agent refused to sign (locked?)" ;;
+  esac
+  return 1
+}
+
+# A machine that just woke, or is on a captive/VPN-less network, resolves
+# nothing — and git's DNS timeout is minutes long, per repo. One cheap TCP
+# connect settles it before any of that. (nc rather than bash's /dev/tcp: some
+# endpoint-security setups SIGKILL /bin/bash for opening a socket.)
+preflight_net() {
+  local secs="${NET_PROBE_TIMEOUT:-8}"
+  run_bounded "$secs" nc -z -G "$secs" -w "$secs" "${NET_PROBE_HOST:-github.com}" 443
+}
+
+if ! preflight_net; then
+  printf 'skip  network unavailable — nothing attempted (%s unreachable)\n' \
+    "${NET_PROBE_HOST:-github.com}"
+  printf 'PULLSPOON_SUMMARY refreshed=0 skipped=1 failed=0\n'
+  exit 5
+fi
+
+if ! preflight_ssh; then
+  printf 'FAIL  ssh auth unavailable — nothing attempted: %s\n' "$auth_error"
+  printf 'PULLSPOON_SUMMARY refreshed=0 skipped=0 failed=1\n'
+  exit 3
+fi
 
 # Print every repo root under the given roots: dirs holding a .git (normal repo
 # or worktree) or a .bare (bare-repo project). Prunes node_modules/vendor and
@@ -53,6 +171,7 @@ find_repos() {
 }
 
 while IFS= read -r dir; do
+  [ -n "$cancelled" ] && break
   [ -n "$dir" ] || continue
   name="${dir##*/}"
 
@@ -95,7 +214,12 @@ while IFS= read -r dir; do
     if out="$(git -C "$dir" fetch origin "$branch:$branch" 2>&1)"; then
       refreshed+=("$name → $branch")
     else
-      skipped+=("$name ($branch): $(last_line "$out")")
+      case "$(classify "$out")" in
+        network)  net_error="$(err_line "$out")"; break ;;
+        auth)     auth_error="$(err_line "$out")"; break ;;
+        diverged) skipped+=("$name ($branch): not fast-forwardable — left untouched") ;;
+        *)        failed+=("$name ($branch): $(err_line "$out")") ;;
+      esac
     fi
     continue
   fi
@@ -105,7 +229,12 @@ while IFS= read -r dir; do
     if out="$(git -C "$wt" pull --ff-only origin "$branch" 2>&1)"; then
       refreshed+=("$name → $branch")
     else
-      failed+=("$name ($branch): $(last_line "$out")")
+      case "$(classify "$out")" in
+        network)  net_error="$(err_line "$out")"; break ;;
+        auth)     auth_error="$(err_line "$out")"; break ;;
+        diverged) skipped+=("$name ($branch): not fast-forwardable — left untouched") ;;
+        *)        failed+=("$name ($branch): $(err_line "$out")") ;;
+      esac
     fi
     continue
   fi
@@ -117,7 +246,7 @@ while IFS= read -r dir; do
     continue
   fi
 
-  if git -C "$wt" pull --ff-only origin "$branch" >/dev/null 2>&1; then
+  if out="$(git -C "$wt" pull --ff-only origin "$branch" 2>&1)"; then
     if git -C "$wt" stash pop >/dev/null 2>&1; then
       refreshed+=("$name → $branch (local changes preserved)")
     else
@@ -128,18 +257,35 @@ while IFS= read -r dir; do
       skipped+=("$name ($branch): stash conflict — left untouched for manual merge")
     fi
   else
-    # Not fast-forwardable (local commits diverged). Working tree was clean after
-    # the stash, so the pop restores the changes onto the unchanged branch.
+    # The pull didn't happen, so the working tree is exactly as the stash left
+    # it and the pop restores the changes onto the unchanged branch — whatever
+    # the reason for the failure.
     git -C "$wt" stash pop >/dev/null 2>&1
-    skipped+=("$name ($branch): not fast-forwardable — left untouched")
+    case "$(classify "$out")" in
+      network)  net_error="$(err_line "$out")"; break ;;
+      auth)     auth_error="$(err_line "$out")"; break ;;
+      diverged) skipped+=("$name ($branch): not fast-forwardable — left untouched") ;;
+      *)        failed+=("$name ($branch): $(err_line "$out")") ;;
+    esac
   fi
 done < <(find_repos)
+
+if [ -n "$net_error" ]; then
+  skipped+=("network unavailable — aborted after ${#refreshed[@]} repos: $net_error")
+fi
+if [ -n "$auth_error" ]; then
+  failed+=("ssh auth unavailable — aborted after ${#refreshed[@]} repos: $auth_error")
+fi
 
 for r in "${refreshed[@]}"; do printf 'ok    %s\n' "$r"; done
 for s in "${skipped[@]}";   do printf 'skip  %s\n' "$s"; done
 for f in "${failed[@]}";    do printf 'FAIL  %s\n' "$f"; done
+[ -n "$cancelled" ] && printf 'skip  cancelled — machine back in use\n'
 
 printf 'PULLSPOON_SUMMARY refreshed=%d skipped=%d failed=%d\n' \
   "${#refreshed[@]}" "${#skipped[@]}" "${#failed[@]}"
 
+if [ -n "$auth_error" ]; then exit 3; fi
+if [ -n "$cancelled" ]; then exit 4; fi
+if [ -n "$net_error" ]; then exit 5; fi
 [ "${#failed[@]}" -eq 0 ]

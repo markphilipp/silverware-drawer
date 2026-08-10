@@ -12,7 +12,7 @@ each computer keeps its own set without touching the shared code.
 | **BeRightBack** | Caffeinate the display while unlocked, release it on lock (and a general lock/unlock action framework). |
 | **BarPeekaboo** | Show the menu bar when the built-in display is primary, hide it when an external display is. |
 | **WindowCarousel** | Cycle through the focused app's windows with a hotkey. |
-| **PullMyMainFinger** | Fast-forward every repo's default branch under `~/Projects` on screen lock (at most once a day), stashing/restoring local changes safely. |
+| **PullMyMainFinger** | Fast-forward every repo's default branch under `~/Projects` while you're idle (at most once every 8h), stashing/restoring local changes safely. |
 | **WorkFocus** | Enable macOS Work Focus while active; clear it after five minutes idle. |
 
 ## Requirements
@@ -114,14 +114,28 @@ If your built-in display reports a different name (e.g. `Color LCD`,
 
 ## PullMyMainFinger
 
-Keeps every repo's default branch current without you thinking about it.
-Triggers whenever the screen locks (a natural moment to hit the network, since
-you're stepping away), but only actually runs if it's been at least
-`minHoursBetweenRuns` (default **8**) since the last successful run. If the
-SSH agent has no usable identities — e.g. 1Password is locked — the run is
-skipped outright rather than generating a batch of doomed-to-fail fetches; it
+Keeps every repo's default branch current without you thinking about it. It
 scans `~/Projects` recursively, finds each git repo, and fast-forwards its
 default branch (`main`/`master`/…, read from `origin/HEAD`) to match origin.
+
+Triggers once you've been away from the keyboard for `idleMinutes` (default
+**5**) **with the screen still unlocked**, and only if it's been at least
+`minHoursBetweenRuns` (default **8**) since the last successful run. Unlocked
+matters: locking the screen locks 1Password too, and its SSH agent then refuses
+to sign, so every fetch stalls on an authorization prompt nobody is there to
+answer. Before touching any repo the run proves two things: the remote is
+reachable at all (a just-woken or VPN-less machine resolves nothing, and git's
+DNS timeout runs into *minutes* per repo), and the agent will actually sign
+(`ssh-add -l` doesn't prove that — it lists identities a locked agent still
+refuses to use). Either failing mid-run aborts the rest, since every remaining
+repo would fail the same way. A DNS failure is reported as a network problem,
+not an auth one, even though git prints "Could not read from remote repository"
+for both.
+
+Come back to the machine — or lock it — and a run in flight is cancelled.
+Cancellation is cooperative: the script finishes the repo it's on and stops
+before the next one, so nothing is ever killed between `stash push` and
+`stash pop`.
 
 Discovery walks the tree for each repo's `.git`/`.bare` marker, pruning
 `node_modules`, `vendor`, and hidden dirs, and stops at each repo root — so a
@@ -143,18 +157,22 @@ default branch wherever it lives:
 Repos with no `origin` remote are skipped silently.
 
 Trigger a refresh by hand from the Hammerspoon console with
-`spoon.PullMyMainFinger:run()` — this still checks the SSH agent, but ignores
-the `minHoursBetweenRuns` gate. The work runs off the main thread via
-`hs.task`; a summary is posted via `hs.notify` only when a run has skips or
-failures worth a look — a "not fast-forwardable" skip (diverged local commits)
-is logged to the console but never triggers a notification, since it's routine
-and self-resolves once you push or rebase.
+`spoon.PullMyMainFinger:run()` (ignores the idle and `minHoursBetweenRuns`
+gates), and stop one with `spoon.PullMyMainFinger:cancel()`. The work runs off
+the main thread via `hs.task`; a summary is posted via `hs.notify` only when a
+run has skips or failures worth a look, timestamped so an old one can't be
+mistaken for a fresh failure (they don't auto-withdraw). A "not
+fast-forwardable" skip (diverged local commits) and an unreachable network are
+logged to the console but never notify — both are routine and self-resolving —
+and a cancelled run doesn't notify at all.
 
 Per-machine `opts`:
 
 ```lua
 { name = "PullMyMainFinger", opts = {
     root = os.getenv("HOME") .. "/Projects",  -- scanned root
+    idleMinutes = 5,                          -- idle time before a run starts
+    pollSeconds = 60,                         -- how often idle state is checked
     minHoursBetweenRuns = 8,                  -- min hours between successful runs
     sshAuthSock = "/path/to/agent.sock",      -- SSH agent for fetches outside a login shell
     notifyOnIssues = true,                    -- notify only on skips/failures
@@ -166,7 +184,11 @@ even though the scheduled run has no login shell; set it to your machine's agent
 socket, or `false` to rely on the inherited environment.
 
 The underlying logic lives in `refresh-default-branches.sh` and can be run
-directly (`PROJECTS_ROOT=~/Projects ./refresh-default-branches.sh`).
+directly (`PROJECTS_ROOT=~/Projects ./refresh-default-branches.sh`). It exits
+`0` clean, `1` if a repo failed, `3` if the SSH agent can't sign, `4` if it was
+cancelled with `SIGTERM`/`SIGINT`, and `5` if the remote is unreachable.
+`NET_PROBE_HOST` (default `github.com`), `NET_PROBE_TIMEOUT`, and
+`SSH_PROBE_TIMEOUT` tune the two preflight checks.
 
 ## License
 
