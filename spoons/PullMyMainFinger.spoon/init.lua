@@ -19,6 +19,12 @@
 --- locks. Cancellation is cooperative — the script finishes the repo it's on
 --- and stops there, so no repo is ever left mid stash/pull/restore.
 ---
+--- This is best effort, and the logging reflects that: every outcome goes to
+--- the Hammerspoon console, and the only thing that reaches Notification
+--- Center is a repo a human has to touch — never a locked agent, a dropped
+--- network, or a branch that just can't be fast-forwarded. At most one such
+--- notification is ever posted; a newer one replaces it.
+---
 --- The actual work lives in refresh-default-branches.sh, run off the main
 --- thread via hs.task; call :run() to trigger a refresh by hand (this ignores
 --- both the idle and minHoursBetweenRuns gates).
@@ -31,7 +37,7 @@ local obj = {}
 obj.__index = obj
 
 obj.name = "PullMyMainFinger"
-obj.version = "0.2.0"
+obj.version = "0.3.0"
 obj.author = "Mark Philipp"
 obj.homepage = "https://github.com/markphilipp/silverware-drawer"
 obj.license = "MIT"
@@ -78,14 +84,24 @@ obj.minHoursBetweenRuns = 8
 obj.sshAuthSock = os.getenv("HOME")
   .. "/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock"
 
+--- PullMyMainFinger.retryAfterDeferralMinutes
+--- Variable
+--- Minutes to wait after any attempt before another one may start. A run that
+--- deferred (1Password locked, no network) would defer again a minute later,
+--- and the poll interval is a minute — without this gate, which advances on
+--- every attempt rather than only on success, one locked agent means a retry
+--- (and a console line) every minute until you come back. Default 60.
+obj.retryAfterDeferralMinutes = 60
+
 --- PullMyMainFinger.notifyOnIssues
 --- Variable
---- Post an `hs.notify` summary, including each skip/failure line, only when a
---- run has skips or failures. Default true. Set false to silence
---- notifications entirely.
+--- Post a single `hs.notify` when a run leaves a repo needing a human — a
+--- stash conflict, or a git error the script can't classify. Default true. Set
+--- false to silence notifications entirely; the console log is unaffected.
 obj.notifyOnIssues = true
 
 obj._lastSuccessKey = "PullMyMainFinger.lastSuccess"
+obj._lastAttemptKey = "PullMyMainFinger.lastAttempt"
 
 function obj:_env()
   local env = {
@@ -104,6 +120,9 @@ end
 --- Refresh all default branches now, asynchronously. No-op if a run is already
 --- in progress. The script itself proves the SSH agent can sign before it
 --- touches any repo, and aborts the whole run on the first auth failure.
+--- Ignores the idle and `minHoursBetweenRuns` gates, but still stamps the
+--- attempt, so it pushes the next automatic run out by
+--- `retryAfterDeferralMinutes`.
 function obj:run()
   if self._task and self._task:isRunning() then
     hs.printf("[PullMyMainFinger] run already in progress")
@@ -112,6 +131,7 @@ function obj:run()
   local script = self.spoonPath .. "refresh-default-branches.sh"
   hs.printf("[PullMyMainFinger] refreshing default branches under %s", self.root)
   self._cancelled = false
+  hs.settings.set(self._lastAttemptKey, os.time())
   self._task = hs.task.new("/bin/bash", function(code, stdout, stderr)
     local cancelled = self._cancelled
     self._task = nil
@@ -136,46 +156,65 @@ function obj:cancel(reason)
   return self
 end
 
+-- One notification at a time: the previous one is withdrawn before the next is
+-- posted, so Notification Center holds the current state rather than a history.
+function obj:_notify(text)
+  if self._notification then self._notification:withdraw() end
+  self._notification = hs.notify.new({
+    title = "PullMyMainFinger",
+    -- This never auto-withdraws, so it must be dateable — otherwise one from
+    -- days ago reads as a run that just finished.
+    subTitle = os.date("%a %b %d, %I:%M %p"),
+    informativeText = text,
+    withdrawAfter = 0,
+  })
+  self._notification:send()
+end
+
 function obj:_report(code, stdout, stderr, cancelled)
   local refreshed = tonumber(stdout:match("refreshed=(%d+)")) or 0
   local skipped = tonumber(stdout:match("skipped=(%d+)")) or 0
-  local failed = tonumber(stdout:match("failed=(%d+)")) or 0
-  hs.printf("[PullMyMainFinger] %s: %d refreshed, %d skipped, %d failed (exit %d)",
-    cancelled and "cancelled" or "done", refreshed, skipped, failed, code)
+  local attention = tonumber(stdout:match("attention=(%d+)")) or 0
+  local deferred = tonumber(stdout:match("deferred=(%d+)")) or 0
+  hs.printf("[PullMyMainFinger] %s: %d refreshed, %d skipped, %d needing attention, %d deferred (exit %d)",
+    cancelled and "cancelled" or "done", refreshed, skipped, attention, deferred, code)
   if stdout ~= "" then hs.printf("[PullMyMainFinger]\n%s", stdout) end
   if stderr ~= "" then hs.printf("[PullMyMainFinger] stderr:\n%s", stderr) end
 
   -- A cancelled run stopped on purpose; whatever it hadn't reached isn't news.
   if cancelled or not self.notifyOnIssues then return end
 
-  -- Diverged histories and an unreachable network are routine, already logged
-  -- above, and fix themselves; they don't need a human's attention the way a
-  -- stash conflict or an auth failure does.
-  local issues = {}
+  -- Everything above is already in the console. Only ATTN lines — a stash
+  -- conflict, or a git error the script couldn't classify — describe a repo
+  -- that stays stuck until someone opens it. A locked agent, a dropped
+  -- network, and a branch that isn't fast-forwardable all clear themselves on
+  -- a later run, which is the whole premise of a best-effort job.
+  local stuck = {}
   for line in stdout:gmatch("[^\n]+") do
-    if (line:match("^skip%s") or line:match("^FAIL%s"))
-      and not line:match("not fast%-forwardable")
-      and not line:match("network unavailable") then
-      table.insert(issues, line)
-    end
+    local repo = line:match("^ATTN%s+(.+)$")
+    if repo then table.insert(stuck, repo) end
   end
-  if #issues > 0 then
-    hs.notify.new({
-      title = "PullMyMainFinger",
-      -- These never auto-withdraw, so they must be dateable — otherwise one
-      -- from days ago reads as a run that just failed.
-      subTitle = os.date("%a %b %d, %I:%M %p"),
-      informativeText = string.format("%d refreshed · %d skipped · %d failed\n%s",
-        refreshed, skipped, failed, table.concat(issues, "\n")),
-      withdrawAfter = 0,
-    }):send()
+  if #stuck == 0 then return end
+  if #stuck == 1 then
+    self:_notify(stuck[1])
+  else
+    self:_notify(string.format("%d repos need attention — see the Hammerspoon console",
+      #stuck))
   end
 end
 
--- True once it's been at least minHoursBetweenRuns since the last successful run.
+-- True once it's been minHoursBetweenRuns since the last complete pass AND
+-- retryAfterDeferralMinutes since the last attempt of any kind. The second gate
+-- is what keeps a deferral from looping: the success stamp doesn't move when a
+-- run can't finish, so on its own the first gate stays open forever and the
+-- poll retries every tick.
 function obj:_dueForRun()
-  local last = hs.settings.get(self._lastSuccessKey) or 0
-  return (os.time() - last) >= self.minHoursBetweenRuns * 3600
+  local now = os.time()
+  if (now - (hs.settings.get(self._lastSuccessKey) or 0)) < self.minHoursBetweenRuns * 3600 then
+    return false
+  end
+  return (now - (hs.settings.get(self._lastAttemptKey) or 0))
+    >= self.retryAfterDeferralMinutes * 60
 end
 
 -- Lock state comes from the caffeinate watcher; this only seeds it at :start(),
@@ -211,7 +250,7 @@ function obj:_tick()
     and (os.time() - self._lastCancel) < self.retryAfterCancelMinutes * 60 then
     return
   end
-  hs.printf("[PullMyMainFinger] idle %d min, unlocked, no successful run in %dh — refreshing",
+  hs.printf("[PullMyMainFinger] idle %d min, unlocked, no complete pass in %dh — refreshing",
     self.idleMinutes, self.minHoursBetweenRuns)
   self:run()
 end

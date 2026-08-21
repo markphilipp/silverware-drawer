@@ -12,7 +12,7 @@ each computer keeps its own set without touching the shared code.
 | **BeRightBack** | Caffeinate the display while unlocked, release it on lock (and a general lock/unlock action framework). |
 | **BarPeekaboo** | Show the menu bar when the built-in display is primary, hide it when an external display is. |
 | **WindowCarousel** | Cycle through the focused app's windows with a hotkey. |
-| **PullMyMainFinger** | Fast-forward every repo's default branch under `~/Projects` while you're idle (at most once every 8h), stashing/restoring local changes safely. |
+| **PullMyMainFinger** | Fast-forward every repo's default branch under `~/Projects` while you're idle (at most once every 8h), stashing/restoring local changes safely. Best effort — only a repo needing a human ever notifies. |
 | **WorkFocus** | Enable macOS Work Focus while active; clear it after five minutes idle. |
 
 ## Requirements
@@ -120,12 +120,20 @@ default branch (`main`/`master`/…, read from `origin/HEAD`) to match origin.
 
 Triggers once you've been away from the keyboard for `idleMinutes` (default
 **5**) **with the screen still unlocked**, and only if it's been at least
-`minHoursBetweenRuns` (default **8**) since the last successful run. Unlocked
-matters: locking the screen locks 1Password too, and its SSH agent then refuses
-to sign, so every fetch stalls on an authorization prompt nobody is there to
-answer. Before touching any repo the run proves two things: the remote is
-reachable at all (a just-woken or VPN-less machine resolves nothing, and git's
-DNS timeout runs into *minutes* per repo), and the agent will actually sign
+`minHoursBetweenRuns` (default **8**) since the last complete pass *and*
+`retryAfterDeferralMinutes` (default **60**) since the last attempt of any kind.
+Unlocked matters: locking the screen locks 1Password too, and its SSH agent then
+refuses to sign, so every fetch stalls on an authorization prompt nobody is
+there to answer. The second gate matters for the same reason in reverse —
+1Password's own auto-lock fires on inactivity even with the screen unlocked, so
+the idle window the job runs in is exactly the window where the agent may have
+just locked itself. That's a deferral, not a failure: the success stamp doesn't
+move, so without a gate that advances on *every* attempt the poll would retry
+each minute for as long as you're away.
+
+Before touching any repo the run proves two things: the remote is reachable at
+all (a just-woken or VPN-less machine resolves nothing, and git's DNS timeout
+runs into *minutes* per repo), and the agent will actually sign
 (`ssh-add -l` doesn't prove that — it lists identities a locked agent still
 refuses to use). Either failing mid-run aborts the rest, since every remaining
 repo would fail the same way. A DNS failure is reported as a network problem,
@@ -154,17 +162,29 @@ default branch wherever it lives:
   to *exactly* its prior state (branch, working tree, index, untracked, stash all
   intact) and skipped — handle it by hand, or let the next run try again.
 
+This is best effort, and each outcome is bucketed accordingly:
+
+| | |
+| --- | --- |
+| `ok` | fast-forwarded |
+| `skip` | nothing to do, self-healing — diverged history, unstashable tree, no discoverable default branch, cancelled mid-run |
+| `ATTN` | a human has to act — stash conflict, or a git error the script can't classify |
+| `defer` | the run couldn't start or had to stop — no network, or the agent won't sign |
+
 Repos with no `origin` remote are skipped silently.
 
 Trigger a refresh by hand from the Hammerspoon console with
 `spoon.PullMyMainFinger:run()` (ignores the idle and `minHoursBetweenRuns`
 gates), and stop one with `spoon.PullMyMainFinger:cancel()`. The work runs off
-the main thread via `hs.task`; a summary is posted via `hs.notify` only when a
-run has skips or failures worth a look, timestamped so an old one can't be
-mistaken for a fresh failure (they don't auto-withdraw). A "not
-fast-forwardable" skip (diverged local commits) and an unreachable network are
-logged to the console but never notify — both are routine and self-resolving —
-and a cancelled run doesn't notify at all.
+the main thread via `hs.task`.
+
+Every outcome goes to the Hammerspoon console. Notification Center only ever
+sees `ATTN` — and only one notification at a time, since a newer one withdraws
+the last, so you get the current state rather than a pile of history. It's
+timestamped, because it doesn't auto-withdraw and an old one would otherwise
+read as a fresh problem. Deferrals, diverged branches, unstashable trees, and
+cancelled runs never notify: all of them clear themselves on a later pass, which
+is the point of a best-effort job.
 
 Per-machine `opts`:
 
@@ -173,9 +193,10 @@ Per-machine `opts`:
     root = os.getenv("HOME") .. "/Projects",  -- scanned root
     idleMinutes = 5,                          -- idle time before a run starts
     pollSeconds = 60,                         -- how often idle state is checked
-    minHoursBetweenRuns = 8,                  -- min hours between successful runs
+    minHoursBetweenRuns = 8,                  -- min hours between complete passes
+    retryAfterDeferralMinutes = 60,           -- min minutes between attempts of any kind
     sshAuthSock = "/path/to/agent.sock",      -- SSH agent for fetches outside a login shell
-    notifyOnIssues = true,                    -- notify only on skips/failures
+    notifyOnIssues = true,                    -- notify only on repos needing a human
 } }
 ```
 
@@ -185,8 +206,11 @@ socket, or `false` to rely on the inherited environment.
 
 The underlying logic lives in `refresh-default-branches.sh` and can be run
 directly (`PROJECTS_ROOT=~/Projects ./refresh-default-branches.sh`). It exits
-`0` clean, `1` if a repo failed, `3` if the SSH agent can't sign, `4` if it was
-cancelled with `SIGTERM`/`SIGINT`, and `5` if the remote is unreachable.
+`0` for a complete pass — `ATTN` items included, since those are repo state and
+not a run failure — `3` if the SSH agent can't sign, `4` if it was cancelled
+with `SIGTERM`/`SIGINT`, and `5` if the remote is unreachable. A non-zero exit
+means the pass didn't finish, so the caller should retry rather than record a
+success.
 `NET_PROBE_HOST` (default `github.com`), `NET_PROBE_TIMEOUT`, and
 `SSH_PROBE_TIMEOUT` tune the two preflight checks.
 

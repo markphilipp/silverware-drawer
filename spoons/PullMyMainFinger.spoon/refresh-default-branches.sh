@@ -26,11 +26,24 @@
 #   NET_PROBE_HOST      host TCP-probed for reachability (default github.com)
 #   NET_PROBE_TIMEOUT   seconds to wait on that probe (default 8)
 #
-# Exit: 0 if nothing failed, 1 if any repo failed, 3 if the SSH agent can't
-# sign, 4 if cancelled via SIGTERM/SIGINT, 5 if the remote is unreachable. For
-# 3 and 5 either nothing was attempted, or the run stopped at the first such
-# failure — every remaining repo would fail identically. Emits per-repo lines
-# plus a trailing `PULLSPOON_SUMMARY refreshed=N skipped=N failed=N` line.
+# This is best effort: a repo that simply can't be fast-forwarded right now is
+# not a failure. Per-repo outcomes land in one of four buckets, each with its
+# own line prefix, so the caller can decide what deserves a human's attention
+# without re-parsing prose:
+#
+#   ok     fast-forwarded
+#   skip   nothing to do, self-healing — diverged history, unstashable tree,
+#          no discoverable default branch, cancelled mid-run
+#   ATTN   a human has to act — stash conflict, or an error we can't classify
+#   defer  the run couldn't start or had to stop: no network, or the SSH agent
+#          won't sign. Every remaining repo would fail identically, so we stop.
+#
+# Exit: 0 for a complete pass (ATTN items included — they're repo state, not a
+# run failure), 3 if the SSH agent can't sign, 4 if cancelled via SIGTERM/SIGINT,
+# 5 if the remote is unreachable. A non-zero exit means the pass was incomplete,
+# so the caller should retry rather than record a success. Emits per-repo lines
+# plus a trailing
+# `PULLSPOON_SUMMARY refreshed=N skipped=N attention=N deferred=N` line.
 set -o pipefail
 
 IFS=':' read -ra ROOTS <<< "${PROJECTS_ROOT:-$HOME/Projects}"
@@ -42,7 +55,8 @@ export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o ConnectTimeou
 
 refreshed=()
 skipped=()
-failed=()
+attention=()
+deferred=()
 seen=""       # shared git dirs already processed, so worktrees aren't refreshed twice
 auth_error="" # set when auth dies; the whole run stops, since every repo would fail too
 net_error=""  # ditto for an unreachable remote
@@ -142,15 +156,15 @@ preflight_net() {
 }
 
 if ! preflight_net; then
-  printf 'skip  network unavailable — nothing attempted (%s unreachable)\n' \
+  printf 'defer network unavailable — nothing attempted (%s unreachable)\n' \
     "${NET_PROBE_HOST:-github.com}"
-  printf 'PULLSPOON_SUMMARY refreshed=0 skipped=1 failed=0\n'
+  printf 'PULLSPOON_SUMMARY refreshed=0 skipped=0 attention=0 deferred=1\n'
   exit 5
 fi
 
 if ! preflight_ssh; then
-  printf 'FAIL  ssh auth unavailable — nothing attempted: %s\n' "$auth_error"
-  printf 'PULLSPOON_SUMMARY refreshed=0 skipped=0 failed=1\n'
+  printf 'defer ssh auth unavailable — nothing attempted: %s\n' "$auth_error"
+  printf 'PULLSPOON_SUMMARY refreshed=0 skipped=0 attention=0 deferred=1\n'
   exit 3
 fi
 
@@ -194,7 +208,7 @@ while IFS= read -r dir; do
   fi
   branch="${branch#origin/}"
   if [ -z "$branch" ]; then
-    failed+=("$name: could not determine default branch")
+    skipped+=("$name: no discoverable default branch")
     continue
   fi
 
@@ -218,7 +232,7 @@ while IFS= read -r dir; do
         network)  net_error="$(err_line "$out")"; break ;;
         auth)     auth_error="$(err_line "$out")"; break ;;
         diverged) skipped+=("$name ($branch): not fast-forwardable — left untouched") ;;
-        *)        failed+=("$name ($branch): $(err_line "$out")") ;;
+        *)        attention+=("$name ($branch): $(err_line "$out")") ;;
       esac
     fi
     continue
@@ -233,7 +247,7 @@ while IFS= read -r dir; do
         network)  net_error="$(err_line "$out")"; break ;;
         auth)     auth_error="$(err_line "$out")"; break ;;
         diverged) skipped+=("$name ($branch): not fast-forwardable — left untouched") ;;
-        *)        failed+=("$name ($branch): $(err_line "$out")") ;;
+        *)        attention+=("$name ($branch): $(err_line "$out")") ;;
       esac
     fi
     continue
@@ -242,7 +256,7 @@ while IFS= read -r dir; do
   # --- checked out, dirty tree → stash, pull, restore (rollback on conflict) -
   orig="$(git -C "$wt" rev-parse HEAD 2>/dev/null)"
   if ! git -C "$wt" stash push -u -m "pull-spoon auto-stash" >/dev/null 2>&1; then
-    failed+=("$name ($branch): could not stash local changes")
+    skipped+=("$name ($branch): could not stash local changes — left untouched")
     continue
   fi
 
@@ -254,7 +268,7 @@ while IFS= read -r dir; do
       # to its prior commit, then the stash reapplies cleanly onto its own base.
       git -C "$wt" reset --hard "$orig" >/dev/null 2>&1
       git -C "$wt" stash pop >/dev/null 2>&1
-      skipped+=("$name ($branch): stash conflict — left untouched for manual merge")
+      attention+=("$name ($branch): stash conflict — left untouched for manual merge")
     fi
   else
     # The pull didn't happen, so the working tree is exactly as the stash left
@@ -265,27 +279,28 @@ while IFS= read -r dir; do
       network)  net_error="$(err_line "$out")"; break ;;
       auth)     auth_error="$(err_line "$out")"; break ;;
       diverged) skipped+=("$name ($branch): not fast-forwardable — left untouched") ;;
-      *)        failed+=("$name ($branch): $(err_line "$out")") ;;
+      *)        attention+=("$name ($branch): $(err_line "$out")") ;;
     esac
   fi
 done < <(find_repos)
 
 if [ -n "$net_error" ]; then
-  skipped+=("network unavailable — aborted after ${#refreshed[@]} repos: $net_error")
+  deferred+=("network unavailable — aborted after ${#refreshed[@]} repos: $net_error")
 fi
 if [ -n "$auth_error" ]; then
-  failed+=("ssh auth unavailable — aborted after ${#refreshed[@]} repos: $auth_error")
+  deferred+=("ssh auth unavailable — aborted after ${#refreshed[@]} repos: $auth_error")
 fi
 
 for r in "${refreshed[@]}"; do printf 'ok    %s\n' "$r"; done
 for s in "${skipped[@]}";   do printf 'skip  %s\n' "$s"; done
-for f in "${failed[@]}";    do printf 'FAIL  %s\n' "$f"; done
+for a in "${attention[@]}"; do printf 'ATTN  %s\n' "$a"; done
+for d in "${deferred[@]}";  do printf 'defer %s\n' "$d"; done
 [ -n "$cancelled" ] && printf 'skip  cancelled — machine back in use\n'
 
-printf 'PULLSPOON_SUMMARY refreshed=%d skipped=%d failed=%d\n' \
-  "${#refreshed[@]}" "${#skipped[@]}" "${#failed[@]}"
+printf 'PULLSPOON_SUMMARY refreshed=%d skipped=%d attention=%d deferred=%d\n' \
+  "${#refreshed[@]}" "${#skipped[@]}" "${#attention[@]}" "${#deferred[@]}"
 
 if [ -n "$auth_error" ]; then exit 3; fi
 if [ -n "$cancelled" ]; then exit 4; fi
 if [ -n "$net_error" ]; then exit 5; fi
-[ "${#failed[@]}" -eq 0 ]
+exit 0
