@@ -2,8 +2,8 @@
 ---
 --- Toggle the macOS menu bar based on which display is primary.
 ---
---- Built-in (laptop) display is main → menu bar always visible. External
---- display is main → menu bar always hidden. Reacts to display changes
+--- Built-in (laptop) display is main → menu bar auto-hidden. External
+--- display is main → menu bar always visible. Reacts to display changes
 --- (plug/unplug monitors, switching primary display) via `hs.screen.watcher`.
 ---
 --- Usage in ~/.hammerspoon/init.lua:
@@ -49,11 +49,11 @@ function obj:_apply()
   self._lastState = state
 
   if state == "builtin" then
-    hs.printf("[BarPeekaboo] Built-in display is main — showing menu bar")
-    self:_setMenuBarAutoHide(false)
-  else
-    hs.printf("[BarPeekaboo] External display is main — hiding menu bar")
+    hs.printf("[BarPeekaboo] Built-in display is main — hiding menu bar")
     self:_setMenuBarAutoHide(true)
+  else
+    hs.printf("[BarPeekaboo] External display is main — showing menu bar")
+    self:_setMenuBarAutoHide(false)
   end
 end
 
