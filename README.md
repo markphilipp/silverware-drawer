@@ -14,6 +14,7 @@ each computer keeps its own set without touching the shared code.
 | [**WindowCarousel**](spoons/WindowCarousel.spoon/README.md) | Cycle through the focused app's windows with a hotkey. |
 | [**PullMyMainFinger**](spoons/PullMyMainFinger.spoon/README.md) | Fast-forward every repo's default branch under `~/Projects` while you're idle (at most once every 8h), stashing/restoring local changes safely. |
 | [**WorkFocus**](spoons/WorkFocus.spoon/README.md) | Enable macOS Work Focus while active; clear it after five minutes idle. |
+| [**BazecorNames**](spoons/BazecorNames.spoon/README.md) | Sync Bazecor layer, macro, and superkey names between machines through an iCloud file. |
 
 ## Requirements
 

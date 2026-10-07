@@ -13,3 +13,6 @@ Icon?
 
 # Logs
 *.log
+
+# Python
+__pycache__/
