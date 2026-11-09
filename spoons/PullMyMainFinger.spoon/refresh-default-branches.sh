@@ -267,8 +267,16 @@ while IFS= read -r dir; do
       # Reapplying the stash onto the new commit conflicts. Roll the branch back
       # to its prior commit, then the stash reapplies cleanly onto its own base.
       git -C "$wt" reset --hard "$orig" >/dev/null 2>&1
-      git -C "$wt" stash pop >/dev/null 2>&1
-      attention+=("$name ($branch): stash conflict — left untouched for manual merge")
+      # A failed pop restores untracked files up to the one that collides, and
+      # reset leaves them in place, so the retry trips over them and strands the
+      # stash. Their content is still in the stash; clear them so it reapplies.
+      git -C "$wt" ls-tree -r -z --name-only 'stash@{0}^3' 2>/dev/null \
+        | (cd "$wt" && xargs -0 rm -f --)
+      if git -C "$wt" stash pop >/dev/null 2>&1; then
+        attention+=("$name ($branch): stash conflict — left untouched for manual merge")
+      else
+        attention+=("$name ($branch): stash conflict — local changes left in stash@{0}, restore by hand")
+      fi
     fi
   else
     # The pull didn't happen, so the working tree is exactly as the stash left
