@@ -184,6 +184,20 @@ find_repos() {
   done
 }
 
+# True when every change in stash@{0} — tracked edits and untracked files —
+# already matches HEAD byte for byte, typically because the same work landed
+# upstream via a PR. Popping would collide on those very files and flag a
+# conflict a human has nothing to resolve in; dropping the stash loses nothing.
+stash_already_in_head() {
+  local wt="$1" mine differs untracked
+  mine="$(git -C "$wt" diff --no-renames --name-only 'stash@{0}^1' 'stash@{0}')" || return 1
+  differs="$(git -C "$wt" diff --no-renames --name-only HEAD 'stash@{0}')" || return 1
+  [ -z "$(comm -12 <(sort <<< "$mine") <(sort <<< "$differs"))" ] || return 1
+  git -C "$wt" rev-parse -q --verify 'stash@{0}^3' >/dev/null || return 0
+  untracked="$(git -C "$wt" diff --no-renames --name-only --diff-filter=AM HEAD 'stash@{0}^3')" || return 1
+  [ -z "$untracked" ]
+}
+
 while IFS= read -r dir; do
   [ -n "$cancelled" ] && break
   [ -n "$dir" ] || continue
@@ -261,7 +275,10 @@ while IFS= read -r dir; do
   fi
 
   if out="$(git -C "$wt" pull --ff-only origin "$branch" 2>&1)"; then
-    if git -C "$wt" stash pop >/dev/null 2>&1; then
+    if stash_already_in_head "$wt"; then
+      git -C "$wt" stash drop >/dev/null 2>&1
+      refreshed+=("$name → $branch (local changes were already upstream)")
+    elif git -C "$wt" stash pop >/dev/null 2>&1; then
       refreshed+=("$name → $branch (local changes preserved)")
     else
       # Reapplying the stash onto the new commit conflicts. Roll the branch back
