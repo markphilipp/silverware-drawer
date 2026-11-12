@@ -192,14 +192,15 @@ function obj:_report(code, stdout, stderr, cancelled)
   local stuck = {}
   for line in stdout:gmatch("[^\n]+") do
     local repo = line:match("^ATTN%s+(.+)$")
-    if repo then table.insert(stuck, repo) end
+    -- Drop the "— what was done about it" tail; a banner has room for a few
+    -- short lines, and the console keeps the full text.
+    if repo then table.insert(stuck, (repo:gsub("%s+—.*$", ""))) end
   end
   if #stuck == 0 then return end
   if #stuck == 1 then
     self:_notify(stuck[1])
   else
-    self:_notify(string.format("%d repos need attention — see the Hammerspoon console",
-      #stuck))
+    self:_notify(string.format("%d repos need attention:\n%s", #stuck, table.concat(stuck, "\n")))
   end
 end
 

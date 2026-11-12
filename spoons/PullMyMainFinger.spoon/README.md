@@ -60,7 +60,10 @@ default branch wherever it lives:
 - **checked out with uncommitted changes** → stash → pull → restore. If the pull
   isn't a fast-forward, or restoring the stash conflicts, the repo is rolled back
   to *exactly* its prior state (branch, working tree, index, untracked, stash all
-  intact) and skipped — handle it by hand, or let the next run try again.
+  intact) and skipped — handle it by hand, or let the next run try again. If
+  every stashed change already matches the pulled commit byte for byte (the
+  work landed upstream), the stash is dropped instead and the repo counts as
+  refreshed.
 
 Repos with no `origin` remote are skipped silently.
 
@@ -76,7 +79,8 @@ Repos with no `origin` remote are skipped silently.
 ## Notifications
 
 Every outcome goes to the Hammerspoon console. Notification Center only ever
-sees `ATTN` — and only one notification at a time, since a newer one withdraws
+sees `ATTN`, listing each stuck repo and branch with its problem (e.g.
+`ui-v3 (master): stash conflict`) — and only one notification at a time, since a newer one withdraws
 the last, so you get the current state rather than a pile of history. It's
 timestamped, because it doesn't auto-withdraw and an old one would otherwise
 read as a fresh problem. Deferrals, diverged branches, unstashable trees, and
